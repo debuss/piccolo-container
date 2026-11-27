@@ -93,7 +93,9 @@ final class ContainerBuilder
      *
      * The container given to the callback is the scope the instance is created in, or the root container.
      *
-     * @param Closure(object, \Psr\Container\ContainerInterface): void $callback
+     * @template T of object
+     * @param class-string<T> $type
+     * @param Closure(T, \Psr\Container\ContainerInterface): mixed $callback
      */
     public function inflect(string $type, Closure $callback): self
     {
@@ -108,7 +110,9 @@ final class ContainerBuilder
      *
      *  $builder->onReset(Logger::class, static fn (Logger $logger) => $logger->reset());
      *
-     * @param Closure(mixed): void $callback
+     * @template T of object
+     * @param class-string<T>|string $id
+     * @param Closure(T): mixed $callback
      */
     public function onReset(string $id, Closure $callback): self
     {

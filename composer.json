@@ -33,7 +33,8 @@
     "psr/container": "^2.0"
   },
   "require-dev": {
-    "pestphp/pest": "^5.1"
+    "pestphp/pest": "^5.1",
+    "phpstan/phpstan": "^2.1"
   },
   "provide": {
     "psr/container-implementation": "2.0"
@@ -41,6 +42,9 @@
   "scripts": {
     "test": [
       "./vendor/bin/pest"
+    ],
+    "analyse": [
+      "./vendor/bin/phpstan analyse --no-progress"
     ]
   },
   "extra": {

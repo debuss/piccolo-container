@@ -1,0 +1,8 @@
+parameters:
+    level: max
+    paths:
+        - src
+        - tests/Types
+    scanFiles:
+        # The classes of the tests, in a single file
+        - tests/Fixtures/Services.php

@@ -7,6 +7,8 @@ use RuntimeException;
 
 /**
  * A service could not be created (unresolvable parameter, failing factory, ...).
+ *
+ * @phpstan-consistent-constructor
  */
 class ContainerException extends RuntimeException implements ContainerExceptionInterface
 {
