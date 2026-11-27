@@ -118,5 +118,9 @@ to list the services or to check that they can all be resolved before a deployme
 ## Tests
 
 ```bash
-composer test
+composer test     # Pest
+composer analyse  # PHPStan, level max
 ```
+
+The container is typed for PHPStan: `get(Foo::class)` is a `Foo`, and the callbacks of `inflect()` and `onReset()` get
+an instance of the given class (`tests/Types` checks these types).

@@ -32,6 +32,11 @@ use UnitEnum;
  * How to create a service (the arguments of its constructor or factory, and the inflectors of its class) is worked out
  * once, the first time it is resolved, and kept for the lifetime of the container: in a worker, the next resolutions
  * only create the instances.
+ *
+ * The plan of a parameter (Argument) is the identifier of a service, the parameter whose default value is an object
+ * created again on each resolution, or a value in an array.
+ *
+ * @phpstan-type Argument string|ReflectionParameter|array{mixed}
  */
 final class Container implements ContainerInterface, ScopeFactory
 {
@@ -43,11 +48,6 @@ final class Container implements ContainerInterface, ScopeFactory
         self::class => true,
         ScopeFactory::class => true,
     ];
-
-    /** The kinds of argument of a plan: a service to resolve, a value, or the default value of a parameter. */
-    private const int SERVICE = 0;
-    private const int VALUE = 1;
-    private const int DEFAULT = 2;
 
     /** @var array<string, mixed> The singletons created so far. */
     private array $singletons = [];
@@ -88,6 +88,11 @@ final class Container implements ContainerInterface, ScopeFactory
         }
     }
 
+    /**
+     * @template T of object
+     * @param class-string<T>|string $id
+     * @return ($id is class-string<T> ? T : mixed)
+     */
     public function get(string $id): mixed
     {
         return $this->resolve($id, null);
@@ -205,6 +210,9 @@ final class Container implements ContainerInterface, ScopeFactory
         return isset(self::SPECIAL[$id]);
     }
 
+    /**
+     * @param string[] $chain
+     */
     private function special(string $id, ?Scope $scope, array $chain): ContainerInterface
     {
         if ($id === ScopeInterface::class) {
@@ -227,6 +235,9 @@ final class Container implements ContainerInterface, ScopeFactory
         return $this->instantiable[$class] ??= class_exists($class) && new ReflectionClass($class)->isInstantiable();
     }
 
+    /**
+     * @param string[] $chain
+     */
     private function autowire(string $id, array $chain): Definition
     {
         if (!class_exists($id)) {
@@ -239,6 +250,9 @@ final class Container implements ContainerInterface, ScopeFactory
         return new Definition($id, Lifetime::Transient);
     }
 
+    /**
+     * @param string[] $chain
+     */
     private function build(Definition $definition, ?Scope $scope, array $chain): mixed
     {
         $chain[] = $definition->id;
@@ -278,13 +292,22 @@ final class Container implements ContainerInterface, ScopeFactory
             return [
                 $arguments === []
                     ? static fn (): mixed => $concrete()
-                    : fn (?Scope $scope, array $chain): mixed => $concrete(...$this->arguments($arguments, $scope, $chain)),
+                    : function (?Scope $scope, array $chain) use ($concrete, $arguments): mixed {
+                        /** @var string[] $chain */
+                        return $concrete(...$this->arguments($arguments, $scope, $chain));
+                    },
                 false
             ];
         }
 
         if ($concrete !== $definition->id && $this->isRegistered($concrete)) {
-            return [fn (?Scope $scope, array $chain): mixed => $this->resolve($concrete, $scope, $chain), true];
+            return [
+                function (?Scope $scope, array $chain) use ($concrete): mixed {
+                    /** @var string[] $chain */
+                    return $this->resolve($concrete, $scope, $chain);
+                },
+                true
+            ];
         }
 
         if (!class_exists($concrete)) {
@@ -308,7 +331,10 @@ final class Container implements ContainerInterface, ScopeFactory
         return [
             $arguments === []
                 ? static fn (): object => new $concrete()
-                : fn (?Scope $scope, array $chain): object => new $concrete(...$this->arguments($arguments, $scope, $chain)),
+                : function (?Scope $scope, array $chain) use ($concrete, $arguments): object {
+                    /** @var string[] $chain */
+                    return new $concrete(...$this->arguments($arguments, $scope, $chain));
+                },
             false
         ];
     }
@@ -319,7 +345,7 @@ final class Container implements ContainerInterface, ScopeFactory
      *
      * @param ReflectionParameter[] $parameters
      * @param string[] $chain
-     * @return list<array{int, mixed}>
+     * @return list<Argument>
      */
     private function argumentsPlan(array $parameters, array $chain): array
     {
@@ -334,10 +360,10 @@ final class Container implements ContainerInterface, ScopeFactory
             $class = $type instanceof ReflectionNamedType && !$type->isBuiltin() ? $type->getName() : null;
 
             $plan[] = match (true) {
-                $class !== null && $this->isRegistered($class) => [self::SERVICE, $class],
+                $class !== null && $this->isRegistered($class) => $class,
                 $parameter->isDefaultValueAvailable() => $this->defaultValuePlan($parameter),
-                $class !== null && $this->isInstantiable($class) => [self::SERVICE, $class],
-                $parameter->allowsNull() => [self::VALUE, null],
+                $class !== null && $this->isInstantiable($class) => $class,
+                $parameter->allowsNull() => [null],
                 default => throw ContainerException::withChain($this->unresolvable($parameter, $class), $chain),
             };
         }
@@ -346,28 +372,29 @@ final class Container implements ContainerInterface, ScopeFactory
     }
 
     /**
-     * @return array{int, mixed}
+     * @return ReflectionParameter|array{mixed}
      */
-    private function defaultValuePlan(ReflectionParameter $parameter): array
+    private function defaultValuePlan(ReflectionParameter $parameter): ReflectionParameter|array
     {
         $value = $parameter->getDefaultValue();
 
-        return is_object($value) && !$value instanceof UnitEnum ? [self::DEFAULT, $parameter] : [self::VALUE, $value];
+        return is_object($value) && !$value instanceof UnitEnum ? $parameter : [$value];
     }
 
     /**
-     * @param list<array{int, mixed}> $plan
+     * @param list<Argument> $plan
      * @param string[] $chain
+     * @return list<mixed>
      */
     private function arguments(array $plan, ?Scope $scope, array $chain): array
     {
         $arguments = [];
 
-        foreach ($plan as [$kind, $value]) {
-            $arguments[] = match ($kind) {
-                self::SERVICE => $this->resolve($value, $scope, $chain),
-                self::VALUE => $value,
-                default => $value->getDefaultValue(),
+        foreach ($plan as $argument) {
+            $arguments[] = match (true) {
+                is_string($argument) => $this->resolve($argument, $scope, $chain),
+                is_array($argument) => $argument[0],
+                default => $argument->getDefaultValue(),
             };
         }
 
