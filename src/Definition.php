@@ -7,12 +7,14 @@ use Closure;
 /**
  * How to create a service, and how long its instances live.
  *
- * @internal Created by the ContainerBuilder.
+ * Created by the ContainerBuilder, and read with Container::definitions(), e.g. to list or check the services.
  */
 final readonly class Definition
 {
 
     /**
+     * @internal Created by the ContainerBuilder.
+     *
      * @param Closure|string|null $concrete A factory (its parameters are autowired), a class name (autowired, or the
      *                                      id of another service), or null to autowire the class named by the id.
      */

@@ -101,6 +101,33 @@ final class Container implements ContainerInterface, ScopeFactory
             || $this->isInstantiable($id);
     }
 
+    /**
+     * The registered services (the instances included), by identifier, in their order of registration. The classes
+     * that are not registered, autowired as transient services, are not part of it.
+     *
+     * @return array<string, Definition>
+     */
+    public function definitions(): array
+    {
+        return $this->definitions;
+    }
+
+    /**
+     * @return array<string, string> The aliases, to the service they end on.
+     */
+    public function aliases(): array
+    {
+        return $this->aliases;
+    }
+
+    /**
+     * @return list<string> The types having inflectors, in their order of registration.
+     */
+    public function inflectedTypes(): array
+    {
+        return array_keys($this->inflectors);
+    }
+
     public function createScope(): ScopeInterface
     {
         return new Scope($this);
