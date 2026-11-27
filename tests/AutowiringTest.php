@@ -4,6 +4,7 @@ use Piccolo\Container\{Container, ContainerBuilder, ScopeFactory, ScopeInterface
 use Piccolo\Container\Exception\{CircularDependencyException, ContainerException, NotFoundException, ScopeException};
 use Psr\Container\{ContainerExceptionInterface, ContainerInterface, NotFoundExceptionInterface};
 use Tests\Fixtures\{AbstractService,
+    Level,
     Clock,
     ClockInterface,
     CycleA,
@@ -13,6 +14,7 @@ use Tests\Fixtures\{AbstractService,
     WithContainer,
     WithDefaults,
     WithDependency,
+    WithEnumDefault,
     WithInterfaceDependency,
     WithNullableInterface,
     WithOptionalInterface,
@@ -151,4 +153,41 @@ test('a singleton gets the root container, even resolved from a scope', function
     $container = new ContainerBuilder()->singleton(WithContainer::class)->build();
 
     expect($container->createScope()->get(WithContainer::class)->container)->toBe($container);
+});
+
+// --- Plans: how to create a service is worked out once, then reused ------------------------------------------------
+
+test('creates a new default object on each resolution from the same container', function () {
+    $container = new ContainerBuilder()->build();
+
+    expect($container->get(WithDefaults::class)->clock)->not->toBe($container->get(WithDefaults::class)->clock);
+});
+
+test('keeps an enum default value', function () {
+    $container = new ContainerBuilder()->build();
+    $container->get(WithEnumDefault::class);
+
+    expect($container->get(WithEnumDefault::class)->level)->toBe(Level::Info);
+});
+
+test('resolves the dependencies again on each creation, with their own lifetime', function () {
+    $container = new ContainerBuilder()
+        ->transient(Clock::class)
+        ->singleton(NoConstructor::class)
+        ->transient('pair', fn (Clock $clock, NoConstructor $shared) => [$clock, $shared])
+        ->build();
+
+    [$firstClock, $firstShared] = $container->get('pair');
+    [$secondClock, $secondShared] = $container->get('pair');
+
+    expect($secondClock)->not->toBe($firstClock)
+        ->and($secondShared)->toBe($firstShared)
+        ->and($container->get(WithDependency::class)->clock)->not->toBe($container->get(WithDependency::class)->clock);
+});
+
+test('fails again on each resolution when a service cannot be created', function () {
+    $container = new ContainerBuilder()->build();
+
+    expect(fn () => $container->get(WithBuiltin::class))->toThrow(ContainerException::class)
+        ->and(fn () => $container->get(WithBuiltin::class))->toThrow(ContainerException::class);
 });

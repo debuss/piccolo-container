@@ -9,7 +9,7 @@ use ReflectionClass;
 use ReflectionFunction;
 use ReflectionNamedType;
 use ReflectionParameter;
-use WeakMap;
+use UnitEnum;
 
 /**
  * The root container, built by the ContainerBuilder.
@@ -28,21 +28,44 @@ use WeakMap;
  *  3. an autowired instance for an instantiable class type;
  *  4. null for a nullable parameter.
  * Union and intersection types, and builtin types without a default value, cannot be resolved.
+ *
+ * How to create a service (the arguments of its constructor or factory, and the inflectors of its class) is worked out
+ * once, the first time it is resolved, and kept for the lifetime of the container: in a worker, the next resolutions
+ * only create the instances.
  */
 final class Container implements ContainerInterface, ScopeFactory
 {
 
+    /** The identifiers resolved to a container, see special(). */
+    private const array SPECIAL = [
+        ContainerInterface::class => true,
+        ScopeInterface::class => true,
+        self::class => true,
+        ScopeFactory::class => true,
+    ];
+
+    /** The kinds of argument of a plan: a service to resolve, a value, or the default value of a parameter. */
+    private const int SERVICE = 0;
+    private const int VALUE = 1;
+    private const int DEFAULT = 2;
+
     /** @var array<string, mixed> The singletons created so far. */
     private array $singletons = [];
 
-    /** @var array<class-string, list<array{ReflectionParameter, ?string}>> The parameters of the constructors. */
-    private array $constructors = [];
+    /** @var array<string, Definition> The definitions of the autowired classes resolved so far. */
+    private array $autowired = [];
+
+    /**
+     * @var array<string, array{Closure(?Scope, string[]): mixed, bool}> How to create each service resolved so far, and
+     *      whether it is another service (created, inflected and tracked on its own).
+     */
+    private array $plans = [];
+
+    /** @var array<class-string, list<Closure>> The inflectors applying to each class created so far. */
+    private array $classInflectors = [];
 
     /** @var array<string, bool> */
     private array $instantiable = [];
-
-    /** @var WeakMap<Closure, list<array{ReflectionParameter, ?string}>> The parameters of the factories. */
-    private WeakMap $factories;
 
     /**
      * @param array<string, Definition> $definitions
@@ -58,8 +81,6 @@ final class Container implements ContainerInterface, ScopeFactory
         private readonly array $inflectors = [],
         private readonly array $resetters = []
     ) {
-        $this->factories = new WeakMap();
-
         foreach ($definitions as $id => $definition) {
             if ($definition->hasInstance) {
                 $this->singletons[$id] = $definition->instance;
@@ -115,7 +136,7 @@ final class Container implements ContainerInterface, ScopeFactory
     {
         $id = $this->aliases[$id] ?? $id;
 
-        if ($this->isSpecial($id)) {
+        if (isset(self::SPECIAL[$id])) {
             return $this->special($id, $scope, $chain);
         }
 
@@ -123,7 +144,7 @@ final class Container implements ContainerInterface, ScopeFactory
             throw CircularDependencyException::withChain(sprintf('Circular dependency on "%s"', $id), [...$chain, $id]);
         }
 
-        $definition = $this->definitions[$id] ?? $this->autowired($id, $chain);
+        $definition = $this->definitions[$id] ?? ($this->autowired[$id] ??= $this->autowire($id, $chain));
 
         switch ($definition->lifetime) {
             case Lifetime::Singleton:
@@ -154,10 +175,7 @@ final class Container implements ContainerInterface, ScopeFactory
 
     private function isSpecial(string $id): bool
     {
-        return $id === ContainerInterface::class
-            || $id === ScopeInterface::class
-            || $id === self::class
-            || $id === ScopeFactory::class;
+        return isset(self::SPECIAL[$id]);
     }
 
     private function special(string $id, ?Scope $scope, array $chain): ContainerInterface
@@ -182,7 +200,7 @@ final class Container implements ContainerInterface, ScopeFactory
         return $this->instantiable[$class] ??= class_exists($class) && new ReflectionClass($class)->isInstantiable();
     }
 
-    private function autowired(string $id, array $chain): Definition
+    private function autowire(string $id, array $chain): Definition
     {
         if (!class_exists($id)) {
             throw NotFoundException::withChain(
@@ -197,106 +215,132 @@ final class Container implements ContainerInterface, ScopeFactory
     private function build(Definition $definition, ?Scope $scope, array $chain): mixed
     {
         $chain[] = $definition->id;
-        $concrete = $definition->concrete ?? $definition->id;
+        [$create, $delegates] = $this->plans[$definition->id] ??= $this->plan($definition, $chain);
 
-        if ($concrete instanceof Closure) {
-            $instance = $concrete(...$this->arguments($this->factoryParameters($concrete), $scope, $chain));
-        } elseif ($concrete !== $definition->id && $this->isRegistered($concrete)) {
-            // Another service: it is inflected (and tracked by the scope) when it is created
-            return $this->resolve($concrete, $scope, $chain);
-        } else {
-            $instance = $this->instantiate($concrete, $scope, $chain);
+        $instance = $create($scope, $chain);
+
+        if ($delegates || !is_object($instance)) {
+            return $instance;
         }
 
-        if (is_object($instance)) {
-            $this->inflect($instance, $scope);
+        foreach ($this->classInflectors[$instance::class] ??= $this->inflectorsOf($instance::class) as $callback) {
+            $callback($instance, $scope ?? $this);
+        }
 
-            if ($scope !== null && $instance instanceof Disposable) {
-                $scope->track($instance);
-            }
+        if ($scope !== null && $instance instanceof Disposable) {
+            $scope->track($instance);
         }
 
         return $instance;
     }
 
-    private function instantiate(string $class, ?Scope $scope, array $chain): object
+    /**
+     * How to create the service of a definition: a closure taking the scope and the chain of the resolution, and
+     * whether it is another service (created, inflected and tracked on its own).
+     *
+     * @param string[] $chain
+     * @return array{Closure(?Scope, string[]): mixed, bool}
+     */
+    private function plan(Definition $definition, array $chain): array
     {
-        if (!class_exists($class)) {
+        $concrete = $definition->concrete ?? $definition->id;
+
+        if ($concrete instanceof Closure) {
+            $arguments = $this->argumentsPlan(new ReflectionFunction($concrete)->getParameters(), $chain);
+
+            return [
+                $arguments === []
+                    ? static fn (): mixed => $concrete()
+                    : fn (?Scope $scope, array $chain): mixed => $concrete(...$this->arguments($arguments, $scope, $chain)),
+                false
+            ];
+        }
+
+        if ($concrete !== $definition->id && $this->isRegistered($concrete)) {
+            return [fn (?Scope $scope, array $chain): mixed => $this->resolve($concrete, $scope, $chain), true];
+        }
+
+        if (!class_exists($concrete)) {
             throw NotFoundException::withChain(
-                sprintf('"%s" is neither a registered service nor an existing class', $class),
+                sprintf('"%s" is neither a registered service nor an existing class', $concrete),
                 $chain
             );
         }
 
-        $parameters = $this->constructors[$class] ??= $this->constructorParameters($class, $chain);
-
-        return $parameters === [] ? new $class() : new $class(...$this->arguments($parameters, $scope, $chain));
-    }
-
-    /**
-     * @return list<array{ReflectionParameter, ?string}>
-     */
-    private function constructorParameters(string $class, array $chain): array
-    {
-        $reflection = new ReflectionClass($class);
+        $reflection = new ReflectionClass($concrete);
 
         if (!$reflection->isInstantiable()) {
             throw ContainerException::withChain(
-                sprintf('The class "%s" is not instantiable (abstract, or with a non-public constructor)', $class),
+                sprintf('The class "%s" is not instantiable (abstract, or with a non-public constructor)', $concrete),
                 $chain
             );
         }
 
-        return $this->parameters($reflection->getConstructor()?->getParameters() ?? []);
+        $arguments = $this->argumentsPlan($reflection->getConstructor()?->getParameters() ?? [], $chain);
+
+        return [
+            $arguments === []
+                ? static fn (): object => new $concrete()
+                : fn (?Scope $scope, array $chain): object => new $concrete(...$this->arguments($arguments, $scope, $chain)),
+            false
+        ];
     }
 
     /**
-     * @return list<array{ReflectionParameter, ?string}>
-     */
-    private function factoryParameters(Closure $factory): array
-    {
-        return $this->factories[$factory] ??= $this->parameters(new ReflectionFunction($factory)->getParameters());
-    }
-
-    /**
-     * The parameters, with the class or interface of their type (null for a builtin, union or intersection type).
-     *
-     * The reflection is kept rather than the default values, as a default value can be a new object (`new Foo()`)
-     * that must not be shared.
+     * How to resolve each parameter, in the order of the class documentation. The services are resolved on each
+     * creation, the values are kept, except a default value that is an object (`new Foo()`), which must not be shared.
      *
      * @param ReflectionParameter[] $parameters
-     * @return list<array{ReflectionParameter, ?string}>
+     * @param string[] $chain
+     * @return list<array{int, mixed}>
      */
-    private function parameters(array $parameters): array
+    private function argumentsPlan(array $parameters, array $chain): array
     {
-        return array_map(
-            static function (ReflectionParameter $parameter): array {
-                $type = $parameter->getType();
+        $plan = [];
 
-                return [$parameter, $type instanceof ReflectionNamedType && !$type->isBuiltin() ? $type->getName() : null];
-            },
-            $parameters
-        );
-    }
-
-    /**
-     * @param list<array{ReflectionParameter, ?string}> $parameters
-     */
-    private function arguments(array $parameters, ?Scope $scope, array $chain): array
-    {
-        $arguments = [];
-
-        foreach ($parameters as [$parameter, $class]) {
+        foreach ($parameters as $parameter) {
             if ($parameter->isVariadic()) {
                 break;
             }
 
-            $arguments[] = match (true) {
-                $class !== null && $this->isRegistered($class) => $this->resolve($class, $scope, $chain),
-                $parameter->isDefaultValueAvailable() => $parameter->getDefaultValue(),
-                $class !== null && $this->isInstantiable($class) => $this->resolve($class, $scope, $chain),
-                $parameter->allowsNull() => null,
+            $type = $parameter->getType();
+            $class = $type instanceof ReflectionNamedType && !$type->isBuiltin() ? $type->getName() : null;
+
+            $plan[] = match (true) {
+                $class !== null && $this->isRegistered($class) => [self::SERVICE, $class],
+                $parameter->isDefaultValueAvailable() => $this->defaultValuePlan($parameter),
+                $class !== null && $this->isInstantiable($class) => [self::SERVICE, $class],
+                $parameter->allowsNull() => [self::VALUE, null],
                 default => throw ContainerException::withChain($this->unresolvable($parameter, $class), $chain),
+            };
+        }
+
+        return $plan;
+    }
+
+    /**
+     * @return array{int, mixed}
+     */
+    private function defaultValuePlan(ReflectionParameter $parameter): array
+    {
+        $value = $parameter->getDefaultValue();
+
+        return is_object($value) && !$value instanceof UnitEnum ? [self::DEFAULT, $parameter] : [self::VALUE, $value];
+    }
+
+    /**
+     * @param list<array{int, mixed}> $plan
+     * @param string[] $chain
+     */
+    private function arguments(array $plan, ?Scope $scope, array $chain): array
+    {
+        $arguments = [];
+
+        foreach ($plan as [$kind, $value]) {
+            $arguments[] = match ($kind) {
+                self::SERVICE => $this->resolve($value, $scope, $chain),
+                self::VALUE => $value,
+                default => $value->getDefaultValue(),
             };
         }
 
@@ -323,16 +367,22 @@ final class Container implements ContainerInterface, ScopeFactory
         return sprintf('Unable to resolve the parameter $%s of %s: %s', $parameter->getName(), $where, $reason);
     }
 
-    private function inflect(object $instance, ?Scope $scope): void
+    /**
+     * The inflectors of the types a class is an instance of, in the order they were added.
+     *
+     * @param class-string $class
+     * @return list<Closure>
+     */
+    private function inflectorsOf(string $class): array
     {
-        foreach ($this->inflectors as $type => $callbacks) {
-            if (!$instance instanceof $type) {
-                continue;
-            }
+        $callbacks = [];
 
-            foreach ($callbacks as $callback) {
-                $callback($instance, $scope ?? $this);
+        foreach ($this->inflectors as $type => $typeCallbacks) {
+            if (is_a($class, $type, true)) {
+                array_push($callbacks, ...$typeCallbacks);
             }
         }
+
+        return $callbacks;
     }
 }
