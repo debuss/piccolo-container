@@ -55,8 +55,9 @@ The parameters of the constructors and factories are resolved in this order:
 3. an autowired instance for an instantiable class type;
 4. `null` for a nullable parameter.
 
-Union and intersection types, and builtin types without a default value, cannot be resolved. The reflection of the
-constructors is cached, so in a worker it is only done once per class.
+Union and intersection types, and builtin types without a default value, cannot be resolved. How to create each
+service (the arguments of its constructor or factory, and the inflectors of its class) is worked out once, the first
+time it is resolved: in a worker, the next resolutions only create the instances, without reflection.
 
 Special identifiers: `ContainerInterface` is the scope the service is resolved from (or the root container),
 `ScopeInterface` the current scope, `Container` and `ScopeFactory` the root container.

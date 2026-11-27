@@ -152,3 +152,14 @@ final class ThirdPartyLogger
 {
     public array $records = [];
 }
+
+enum Level
+{
+    case Info;
+    case Debug;
+}
+
+final class WithEnumDefault
+{
+    public function __construct(public readonly Level $level = Level::Info) {}
+}

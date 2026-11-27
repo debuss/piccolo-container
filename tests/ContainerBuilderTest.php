@@ -91,6 +91,19 @@ test('the inflectors apply to the instances of the factories and the autowired c
         ->and($container->get(AwareService::class)->calls)->toBe(['inflected']);
 });
 
+test('the inflectors apply to the class of each instance a factory creates', function () {
+    $created = 0;
+    $container = new ContainerBuilder()
+        ->transient('service', function () use (&$created): object {
+            return ++$created === 1 ? new NoConstructor() : new AwareService();
+        })
+        ->inflect(AwareService::class, fn (AwareService $service) => $service->calls[] = 'inflected')
+        ->build();
+
+    expect($container->get('service'))->toBeInstanceOf(NoConstructor::class)
+        ->and($container->get('service')->calls)->toBe(['inflected']);
+});
+
 test('the inflectors are applied once to a service bound to another one', function () {
     $container = new ContainerBuilder()
         ->singleton(AwareService::class)
