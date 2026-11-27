@@ -109,6 +109,12 @@ $builder->inflect(
 - `Container::reset()`, called by a worker after each request, resets the singletons already created that implement
   `Resettable`, and calls the hooks registered with `$builder->onReset(Logger::class, fn (Logger $l) => $l->reset())`.
 
+### Introspection
+
+`Container::definitions()` gives the registered services (`Definition`: `id`, `lifetime`, `concrete`, `hasInstance`,
+`instance`), `aliases()` the aliases to the service they end on, and `inflectedTypes()` the types having inflectors, e.g.
+to list the services or to check that they can all be resolved before a deployment.
+
 ## Tests
 
 ```bash
